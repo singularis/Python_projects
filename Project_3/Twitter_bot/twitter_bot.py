@@ -5,9 +5,9 @@ auth_token =  ./auth_token
 client = Client(account_sid, auth_token)
 
 message = client.messages.create(
-    from_='+19292050759',
+    from_='',
     body='It`s work',
-    to='+380661246867'
+    to=''
 )
 
 print(message.sid)

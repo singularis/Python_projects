@@ -1,0 +1,1 @@
+Translate è uno strumento di traduzione semplice ma potente scritto in Python con supporto per più fornitori di traduzione. Può essere utilizzato come modulo Python o come strumento da riga di comando

@@ -1,0 +1,104 @@
+from prometheus_api_client import PrometheusConnect
+import logging
+import boto3
+import time
+import os
+
+
+#Configuration section
+#Ammend list_of_custom_query with Prometheus metrics, that you want to export in the format:
+#[Prometheus query, display name in CW, metric unit]
+#https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/cloudwatch.html#CloudWatch.Client.put_metric_data
+list_of_custom_query=(['rate(node_disk_writes_completed_total[2m])','Disk_write_IOPS', 'Count'], 
+['rate(node_disk_reads_completed_total[2m])','Disk_read_IOPS', 'Count'])
+
+
+#Prometheus URL
+url = os.environ['prometheus_url']
+
+
+#Name of category to pushing in CW
+header_name = os.environ['header_name']
+
+
+#Label for separating data by nodes
+label_config = {'job': 'node'}
+
+
+logger=logging.getLogger(__name__)
+logger.setLevel(logging.ERROR) #Level of logger
+formatter=logging.Formatter('%(asctime)s:%(levelname)s:%(message)s')
+stream_hadnler=logging.StreamHandler()
+stream_hadnler.setFormatter(formatter)
+logger.addHandler(stream_hadnler)
+
+
+cloudwatch = boto3.client('cloudwatch')
+
+
+#Connecting to Prometheus API
+def api_connect():
+    try:
+        prometheus_api = PrometheusConnect(url, disable_ssl=True)
+        return prometheus_api
+    except OverflowError as prometheus_over_err:
+        logger.critical("To much data: \n{}".format(prometheus_over_err))
+    else: 
+        logger.critical("Something went wrong during connect to API")
+
+
+#Scraping metrics from Prometheus
+def metrics_collector():
+    try:
+        prometheus = api_connect()
+        for custom_query_unit in list_of_custom_query:
+            logger.debug("Sending custom query")
+            custom_query_val = prometheus.custom_query(custom_query_unit[0])
+            data_parser(custom_query_val, custom_query_unit[1], custom_query_unit[2])
+    except TypeError as metrics_filter_err:
+        logger.critical("Type error: \n{}".format(metrics_filter_err)) 
+
+
+#Parsing incoming data before sending     
+def data_parser(raw_data, metric_scraping, measure_unit):
+    for metric in raw_data:
+        logger.info (f'Scrapping metric {metric_scraping}')
+        broker_name=metric.get('metric').get('instance')
+        logger.info(f'Broker name {broker_name}')
+        metric_value=float(metric.get('value')[1])
+        logger.info(f'Metric value {metric_value}')
+        cloudwatch_sender(header_name, metric_scraping, broker_name, metric_value, measure_unit)
+
+
+#Sending data to CW
+def cloudwatch_sender(namespace_for_metric="MetricFromScript",metric_scraping="MetricFromScript", broker_name="BrokerFromScript", 
+metric_value=0, unit="Milliseconds"):
+    try:
+        response = cloudwatch.put_metric_data(
+        Namespace=namespace_for_metric,
+        MetricData=[
+            {
+                'MetricName': metric_scraping,
+                'Dimensions': [
+                    {
+                        'Name': metric_scraping,
+                        'Value': broker_name
+                    },
+                ],
+                'Timestamp': time.time(),
+                'Value': metric_value,
+                'Unit': unit,
+                'StorageResolution': 60 #Standard resolution 60 sec, high resolution 1 sec
+            },
+        ]
+        )
+        CW_response=response.get('ResponseMetadata').get('HTTPStatusCode')
+        logger.debug(f'CW response is {CW_response}')
+        if CW_response != 200:
+            logger.critical ("Can't send the metric")
+    except TypeError as metrics_filter_err:
+        logger.error("Type error: \n{}".format(metrics_filter_err)) 
+
+
+def lambda_handler(event, context):
+    metrics_collector()

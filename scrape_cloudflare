@@ -1,0 +1,108 @@
+import requests
+import logging
+import json
+import sys
+import os
+from botocore.config import Config
+from botocore.session import Session
+from botocore.exceptions import ClientError
+
+
+logger = logging.getLogger()
+logger.setLevel(logging.ERROR)
+
+def lambda_handler(event, context):
+        get_secrets()
+        get_cloudflare()
+        
+
+
+def get_secrets():
+    SM_REGION = os.environ['SECRETS_REGION']
+    CF_SECRET = os.environ['CF_SECRET']
+    NR_SECRET = os.environ['NR_SECRET']
+    try:
+        sm_session = Session()
+        secretsmanager = sm_session.create_client('secretsmanager', region_name=SM_REGION, config=Config(connect_timeout=1, read_timeout=1, retries={'max_attempts': 3}))
+    except ClientError as secretsmanager_e:
+        logger.error("Failed to establish connection to AWS SecretsManager. \n{}".format(secretsmanager_e))   
+    try:
+        CF_TOKEN = json.loads(secretsmanager.get_secret_value(SecretId=CF_SECRET)['SecretString'])['global_api_key']
+        CF_EMAIL = json.loads(secretsmanager.get_secret_value(SecretId=CF_SECRET)['SecretString'])['auth_email']
+        CF_ZONE_ID = json.loads(secretsmanager.get_secret_value(SecretId=CF_SECRET)['SecretString'])['ZONE_ID']
+        CF_ACCOUNT_ID = json.loads(secretsmanager.get_secret_value(SecretId=CF_SECRET)['SecretString'])['ACCOUNT_ID']
+        NR_TOKEN = json.loads(secretsmanager.get_secret_value(SecretId=NR_SECRET)['SecretString'])['insert_api_key']
+        NR_ACC_ID = json.loads(secretsmanager.get_secret_value(SecretId=NR_SECRET)['SecretString'])['account_id']
+    except ClientError as secrets_e:
+        logger.error("Failed to retrieve secret from AWS SecretsManager. \n{}".format(secrets_e))
+        return None
+    return {"CF_TOKEN": CF_TOKEN, "CF_EMAIL": CF_EMAIL, "CF_ZONE_ID": CF_ZONE_ID, "CF_ACCOUNT_ID": CF_ACCOUNT_ID, "NR_TOKEN": NR_TOKEN, "NR_ACC_ID": NR_ACC_ID}
+
+
+def get_cloudflare():
+    pools=[]
+    origins=[]
+    nr_origin=[]
+    lb_requst =requster("zones","load_balancers")
+    for sets in lb_requst.get('result'):
+        pools_iter=sets.get("default_pools")
+        pools.append(pools_iter)
+        for pool in pools_iter:
+            origins_data=requster("accounts",f"load_balancers/pools/{pool}")
+            origins=(origins_data.get("result").get("origins"))
+            for origin in origins:
+                origin_list={"eventType":'CloudFlareDataOrigin', "Pool":pool, "LB": sets.get("name"), "Pool_name": origins_data.get("result").get("name"), "reportedBy":"SRE_CloudFlare_origins"}
+                origin_list.update(origin)
+                nr_origin.append(origin_list)
+    put_nr(nr_origin)
+    return None
+
+
+def requster(source, url_appended):
+    creds = get_secrets()
+    headers = {'X-AUTH-EMAIL': creds["CF_EMAIL"],
+               'X-AUTH-KEY': creds["CF_TOKEN"],
+               'Content-Type': 'application/json'}
+    api_url = 'https://api.cloudflare.com/client/v4/'
+    if(source == "zones"):
+        cf_url = f"{api_url}{source}/{creds['CF_ZONE_ID']}/{url_appended}"
+    if(source == "accounts"):
+        cf_url = f"{api_url}{source}/{creds['CF_ACCOUNT_ID']}/{url_appended}"
+    for attempt in range(3):
+        try:
+            api_response = requests.get(cf_url, headers=headers)
+            if api_response.status_code != 200:
+                raise requests.HTTPError("Expected status code 200, but got {}".format(api_response.status_code))
+        except requests.HTTPError as http_error:
+            logger.warning("Failed to get data from CloudFlare due to HTTP Error! %s", http_error)
+        except:
+            logger.warning("Exception occurred: \n{}".format(sys.exc_info()))
+        else:
+            logger.debug("Response (Status Codes details): {}".format(json.dumps(api_response.json(), indent=2)))
+            break
+    else:
+        logger.error("All 3 attempts to get the data from Cloudflare failed!")
+        return None
+    return api_response.json()
+
+def put_nr(nr_payload):
+    creds = get_secrets()
+    NR_ACC_ID=creds["NR_ACC_ID"]
+    NR_TOKEN=creds["NR_TOKEN"]
+    NR_HEADERS = { 'X-Insert-Key': NR_TOKEN }
+    nr_url = 'https://insights-collector.newrelic.com/v1/accounts/' + NR_ACC_ID + '/events'
+    for attempt in range(3):
+        try:
+            nr_response = requests.post(nr_url, json=nr_payload, headers=NR_HEADERS, timeout=8)
+            logger.info("Request headers (NewRelic): {} \nBody: {}".format(nr_response.request.headers, nr_response.request.body))
+            if nr_response.status_code != 200:
+                raise requests.HTTPError("Expected status code 200, but got {}".format(nr_response.status_code))
+        except requests.HTTPError as nr_http_error:
+            logger.warning("HTTP Error appeared while posting data to New Relic! \n%s", nr_http_error)
+        except:
+            logger.warning("Exception occurred while posting data to New Relic: \n{}".format(sys.exc_info()))
+        else:
+            break
+    else:
+        logger.error("All 3 attempts on pushing data to New Relic failed! \nHere is the payload: {}".format(nr_payload))
+        return None

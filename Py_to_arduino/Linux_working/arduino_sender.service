@@ -1,0 +1,13 @@
+[Unit]
+Description=Created for sending data from root os to arduino
+
+[Service]
+Type=simple
+User=root
+RestartSec=1
+Restart=always
+ExecStart=/usr/bin/python3 /home/dante/data/Python_projects/Py_to_arduino/Linux_working/sender.py
+
+
+[Install]
+WantedBy=multi-user.target
